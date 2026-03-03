@@ -13,6 +13,7 @@ Directus bundle extension containing SAP Service Layer operations for use in Dir
 - `npm run dev` — Watch mode (rebuilds on change)
 
 ## Rules
+See `.claude/RULES.md` for the full rules list — always follow these.
 - JavaScript only (no TypeScript), ES modules
 - Each operation has `api.js` (server handler) and `app.js` (Vue options UI)
 - Shared logic lives in `src/shared/` — SAP HTTP client, constants, error helpers

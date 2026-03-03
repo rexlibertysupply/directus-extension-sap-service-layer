@@ -1,15 +1,27 @@
 import https from 'node:https';
 
+const DEFAULT_TIMEOUT_MS = 30_000;
+
 /**
  * Create a SAP Service Layer HTTP client.
- * Returns an object with get, post, patch methods that use the { data, error } pattern.
+ * Returns an object with get, post, patch, delete, login, logout methods
+ * that all use the { data, error } pattern.
+ *
+ * rejectUnauthorized defaults to false — SAP on-prem installations commonly use
+ * self-signed certificates. Set SAP_REJECT_UNAUTHORIZED=true in .env to enforce
+ * certificate verification (e.g. when SAP is behind a trusted reverse proxy).
+ *
+ * timeoutMs defaults to 30s. Set SAP_REQUEST_TIMEOUT_MS in .env to override.
  */
-export function createSapClient({ serviceLayerUrl, sessionId, rejectUnauthorized = false }) {
-	const baseUrl = serviceLayerUrl.replace(/\/+$/, '');
+export function createSapClient({ serviceLayerUrl, sessionId, rejectUnauthorized = false, timeoutMs = DEFAULT_TIMEOUT_MS }) {
+	if (!serviceLayerUrl || typeof serviceLayerUrl !== 'string') {
+		throw new Error('SAP client: serviceLayerUrl is required and must be a string.');
+	}
 
+	const baseUrl = serviceLayerUrl.replace(/\/+$/, '');
 	const agent = new https.Agent({ rejectUnauthorized });
 
-	async function request(method, path, body = null) {
+	async function sendRequest(method, path, body = null) {
 		const url = `${baseUrl}/${path}`;
 		const headers = {
 			'Content-Type': 'application/json',
@@ -29,11 +41,13 @@ export function createSapClient({ serviceLayerUrl, sessionId, rejectUnauthorized
 			options.body = JSON.stringify(body);
 		}
 
-		const start = Date.now();
+		const controller = new AbortController();
+		const timer = setTimeout(() => controller.abort(), timeoutMs);
+		options.signal = controller.signal;
 
 		try {
 			const res = await fetch(url, options);
-			const duration = Date.now() - start;
+			clearTimeout(timer);
 
 			if (res.status === 204) {
 				return { data: { success: true }, error: null };
@@ -45,7 +59,9 @@ export function createSapClient({ serviceLayerUrl, sessionId, rejectUnauthorized
 			if (contentType.includes('application/json')) {
 				responseData = await res.json();
 			} else {
-				responseData = await res.text();
+				// Wrap non-JSON text responses in a consistent object shape.
+				const text = await res.text();
+				responseData = { value: text };
 			}
 
 			if (!res.ok) {
@@ -55,11 +71,13 @@ export function createSapClient({ serviceLayerUrl, sessionId, rejectUnauthorized
 
 			return { data: responseData, error: null };
 		} catch (err) {
+			clearTimeout(timer);
+			const isTimeout = err.name === 'AbortError';
 			return {
 				data: null,
 				error: {
-					code: 'CONNECTION_ERROR',
-					message: err.message,
+					code: isTimeout ? 'TIMEOUT' : 'CONNECTION_ERROR',
+					message: isTimeout ? `SAP request timed out after ${timeoutMs}ms` : err.message,
 					statusCode: 0,
 				},
 			};
@@ -69,37 +87,37 @@ export function createSapClient({ serviceLayerUrl, sessionId, rejectUnauthorized
 	function buildQueryString(params) {
 		if (!params || typeof params !== 'object') return '';
 
-		const parts = [];
+		const queryParts = [];
 		for (const [key, value] of Object.entries(params)) {
 			if (value !== undefined && value !== null && value !== '') {
 				const paramKey = key.startsWith('$') ? key : `$${key}`;
-				parts.push(`${paramKey}=${encodeURIComponent(value)}`);
+				queryParts.push(`${paramKey}=${encodeURIComponent(value)}`);
 			}
 		}
 
-		return parts.length > 0 ? `?${parts.join('&')}` : '';
+		return queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
 	}
 
 	return {
 		async get(entity, queryParams) {
 			const qs = buildQueryString(queryParams);
-			return request('GET', `${entity}${qs}`);
+			return sendRequest('GET', `${entity}${qs}`);
 		},
 
 		async post(entity, body) {
-			return request('POST', entity, body);
+			return sendRequest('POST', entity, body);
 		},
 
 		async patch(entity, body) {
-			return request('PATCH', entity, body);
+			return sendRequest('PATCH', entity, body);
 		},
 
 		async delete(entity) {
-			return request('DELETE', entity);
+			return sendRequest('DELETE', entity);
 		},
 
 		async login(companyDB, userName, password) {
-			return request('POST', 'Login', {
+			return sendRequest('POST', 'Login', {
 				CompanyDB: companyDB,
 				UserName: userName,
 				Password: password,
@@ -107,7 +125,7 @@ export function createSapClient({ serviceLayerUrl, sessionId, rejectUnauthorized
 		},
 
 		async logout() {
-			return request('POST', 'Logout');
+			return sendRequest('POST', 'Logout');
 		},
 	};
 }
