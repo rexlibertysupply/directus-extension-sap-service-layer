@@ -1,5 +1,6 @@
 import { createSapClient } from './sap-client.js';
 import { SESSION_TIMEOUT_MINUTES } from './constants.js';
+import { decrypt } from './crypto.js';
 
 /**
  * In-memory SAP session pool.
@@ -39,7 +40,7 @@ export function removeSession(userId) {
  * Returns { serviceLayerUrl, companyDB, userName, password } or null if not configured.
  */
 export async function getSapCredentials(userId, context) {
-	const { services, database, getSchema } = context;
+	const { services, database, getSchema, env } = context;
 	const schema = await getSchema();
 	const usersService = new services.UsersService({
 		knex: database,
@@ -58,7 +59,7 @@ export async function getSapCredentials(userId, context) {
 		serviceLayerUrl: user.sap_service_layer_url,
 		companyDB: user.sap_company_db,
 		userName: user.sap_username,
-		password: user.sap_password,
+		password: decrypt(user.sap_password, env.SECRET),
 	};
 }
 
