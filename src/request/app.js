@@ -4,8 +4,8 @@ export default {
 	icon: 'swap_horiz',
 	description: 'Send a GET, POST, PATCH, or DELETE request to any SAP Service Layer entity.',
 	overview: ({ method, entity }) => [
-		{ label: 'Method', text: method },
-		{ label: 'Entity', text: entity },
+		{ label: 'Method', text: method ?? 'Not set' },
+		{ label: 'Entity', text: entity ?? 'Not set' },
 	],
 	options: [
 		{
@@ -18,7 +18,7 @@ export default {
 			meta: {
 				width: 'full',
 				interface: 'boolean',
-				note: 'When enabled, session is managed automatically using your SAP credentials from your user profile. Disable to use an explicit session ID.',
+				note: 'When enabled, session is managed automatically using your SAP credentials from your user profile. Disable to provide credentials below.',
 			},
 		},
 		{
@@ -28,7 +28,7 @@ export default {
 			meta: {
 				width: 'full',
 				interface: 'input',
-				note: 'e.g. https://10.1.3.50:50000/b1s/v1',
+				note: 'e.g. https://10.1.3.50:50000/b1s/v1 — leave blank to use SAP_SERVICE_LAYER_URL env var.',
 				conditions: [
 					{
 						rule: { _and: [{ useSessionPool: { _eq: true } }] },
@@ -38,13 +38,46 @@ export default {
 			},
 		},
 		{
-			field: 'sessionId',
-			name: 'Session ID',
+			field: 'companyDB',
+			name: 'Company DB',
 			type: 'string',
 			meta: {
-				width: 'full',
+				width: 'half',
 				interface: 'input',
-				note: 'Use {{$last.sessionId}} from a SAP Login step',
+				note: 'Leave blank to use SAP_COMPANY_DB env var.',
+				conditions: [
+					{
+						rule: { _and: [{ useSessionPool: { _eq: true } }] },
+						hidden: true,
+					},
+				],
+			},
+		},
+		{
+			field: 'userName',
+			name: 'SAP Username',
+			type: 'string',
+			meta: {
+				width: 'half',
+				interface: 'input',
+				conditions: [
+					{
+						rule: { _and: [{ useSessionPool: { _eq: true } }] },
+						hidden: true,
+					},
+				],
+			},
+		},
+		{
+			field: 'password',
+			name: 'SAP Password',
+			type: 'string',
+			meta: {
+				width: 'half',
+				interface: 'input',
+				options: {
+					masked: true,
+				},
 				conditions: [
 					{
 						rule: { _and: [{ useSessionPool: { _eq: true } }] },

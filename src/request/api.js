@@ -1,31 +1,43 @@
 import { createSapClient } from '../shared/sap-client.js';
 import { ensureSession, removeSession } from '../shared/session-pool.js';
-import { resolveServiceLayerUrl, buildSapClientOptions } from '../shared/helpers.js';
+import { resolveServiceLayerUrl, resolveCompanyDB, buildSapClientOptions } from '../shared/helpers.js';
 
 export default {
 	id: 'sap-request',
-	handler: async ({ serviceLayerUrl, sessionId, method, entity, entityKey, queryParams, body, useSessionPool }, context) => {
+	handler: async (
+		{ serviceLayerUrl, method, entity, entityKey, queryParams, body, useSessionPool, companyDB, userName, password },
+		context,
+	) => {
 		const { accountability, logger, env } = context;
 		const userId = accountability?.user;
 
 		const { path, params, payload } = parseOperationInputs({ entity, entityKey, queryParams, body });
 
 		// Two modes:
-		//   Pool mode (useSessionPool: true, default) — session managed automatically from user profile.
-		//   Explicit mode (useSessionPool: false) — caller provides serviceLayerUrl + sessionId directly.
-		// Falls back to explicit mode when there is no authenticated Directus user (e.g. API key context).
-		const { resolvedUrl, resolvedSessionId } = await resolveOperationSession({
-			useSessionPool, userId, serviceLayerUrl, sessionId, env, logger, context,
+		//   1. Pool mode (default) — useSessionPool is true → ensureSession() from user profile.
+		//   2. Override mode — useSessionPool is false → inline login with provided credentials.
+		const session = await resolveOperationSession({
+			useSessionPool, userId, serviceLayerUrl, companyDB, userName, password, env, logger, context,
 		});
 
-		let result = await executeRequest(resolvedUrl, resolvedSessionId, method, path, params, payload, env);
+		let result = await executeRequest(session.resolvedUrl, session.resolvedSessionId, method, path, params, payload, env);
 
-		// On 401, re-authenticate once and retry (session may have expired mid-flow).
-		if (result.error?.statusCode === 401 && useSessionPool !== false && userId) {
+		// On 401, re-authenticate once and retry — only for pool mode (session may have expired mid-flow).
+		if (result.error?.statusCode === 401 && session.mode === 'pool') {
 			logger?.debug(`SAP 401 on ${method} ${path} — re-authenticating`);
 			removeSession(userId);
-			const session = await ensureSession(userId, context, logger);
-			result = await executeRequest(session.serviceLayerUrl, session.sessionId, method, path, params, payload, env);
+			const refreshed = await ensureSession(userId, context, logger);
+			result = await executeRequest(refreshed.serviceLayerUrl, refreshed.sessionId, method, path, params, payload, env);
+		}
+
+		// For override mode, logout the ephemeral session after use.
+		if (session.mode === 'override' && session.resolvedSessionId) {
+			try {
+				const client = createSapClient({ serviceLayerUrl: session.resolvedUrl, sessionId: session.resolvedSessionId, ...buildSapClientOptions(env) });
+				await client.logout();
+			} catch {
+				logger?.debug('SAP override session logout failed (non-critical)');
+			}
 		}
 
 		if (result.error) {
@@ -59,24 +71,41 @@ function parseOperationInputs({ entity, entityKey, queryParams, body }) {
 	return { path, params, payload };
 }
 
-async function resolveOperationSession({ useSessionPool, userId, serviceLayerUrl, sessionId, env, logger, context }) {
+async function resolveOperationSession({ useSessionPool, userId, serviceLayerUrl, companyDB, userName, password, env, logger, context }) {
+	// Mode 1: Pool — session managed automatically from user profile
 	if (useSessionPool !== false && userId) {
 		const session = await ensureSession(userId, context, logger);
-		return { resolvedUrl: session.serviceLayerUrl, resolvedSessionId: session.sessionId };
+		return { mode: 'pool', resolvedUrl: session.serviceLayerUrl, resolvedSessionId: session.sessionId };
 	}
 
+	// Mode 2: Override — inline login with provided credentials
 	const resolvedUrl = resolveServiceLayerUrl(serviceLayerUrl, null, env, logger);
 	if (!resolvedUrl) {
-		logger?.error('SAP Request: No Service Layer URL provided and SAP_SERVICE_LAYER_URL env var is not set');
 		throw new Error('No SAP Service Layer URL. Provide it in the operation options or set SAP_SERVICE_LAYER_URL environment variable.');
 	}
 
-	if (!sessionId) {
-		logger?.error('SAP Request: No session ID provided and session pool is disabled');
-		throw new Error('No SAP session ID. Either enable "Use Session Pool" or provide a session ID from a SAP Login step.');
+	if (!userName || !password) {
+		throw new Error('Session pool is disabled — SAP Username and Password are required.');
 	}
 
-	return { resolvedUrl, resolvedSessionId: sessionId };
+	const resolvedCompanyDB = resolveCompanyDB(companyDB, null, env, logger);
+	if (!resolvedCompanyDB) {
+		throw new Error('No Company DB. Provide it in the operation options or set SAP_COMPANY_DB environment variable.');
+	}
+
+	logger?.debug('SAP Request: using override credentials for inline login');
+	const client = createSapClient({ serviceLayerUrl: resolvedUrl, ...buildSapClientOptions(env) });
+	const loginResult = await client.login(resolvedCompanyDB, userName, password);
+
+	if (loginResult.error) {
+		throw new Error(`SAP login failed: ${loginResult.error.message}`);
+	}
+
+	return {
+		mode: 'override',
+		resolvedUrl,
+		resolvedSessionId: loginResult.data.SessionId,
+	};
 }
 
 async function executeRequest(serviceLayerUrl, sessionId, method, path, params, payload, env) {
